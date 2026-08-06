@@ -9,7 +9,7 @@ on:
 
 jobs:
   hello:
-    runs-on: ubuntu-lastest
+    runs-on: ubuntu-latest
 
     steps:
       - name: Say hello~

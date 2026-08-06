@@ -1,4 +1,13 @@
+name: Hello Action
+
 on:
+  push:
+    branches:
+      - main
+
+  workflow_dispatch:
+
+jobs:
   hello:
     runs-on: ubuntu-lastest
 

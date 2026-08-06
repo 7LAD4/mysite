@@ -1,0 +1,7 @@
+on:
+  hello:
+    runs-on: ubuntu-lastest
+
+    steps:
+      - name: Say hello~
+        run: echo "Hello Github Actions!"

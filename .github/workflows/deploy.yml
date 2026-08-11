@@ -203,31 +203,22 @@ jobs:
       # 추가 태그:
       # StaticPublisher=true
       # ----------------------------------------------------------
-      - name: Find primary EC2 instance
+       - name: Select one EC2 for migration and static publishing
         id: primary_instance
         shell: bash
+        env:
+          INSTANCE_IDS: ${{ steps.django_instances.outputs.instance_ids }}
         run: |
           set -Eeuo pipefail
 
-          PRIMARY_INSTANCE_ID=$(aws ec2 describe-instances \
-            --region "$AWS_REGION" \
-            --filters \
-              "Name=tag:Project,Values=$PROJECT_TAG" \
-              "Name=tag:Environment,Values=$ENVIRONMENT_TAG" \
-              "Name=tag:StaticPublisher,Values=true" \
-              "Name=instance-state-name,Values=running" \
-            --query "Reservations[].Instances[].InstanceId" \
-            --output text)
+          PRIMARY_INSTANCE_ID=$(awk '{print $1}' <<< "$INSTANCE_IDS")
 
-          PRIMARY_COUNT=$(wc -w <<< "$PRIMARY_INSTANCE_ID")
-
-          if [ "$PRIMARY_COUNT" -ne 1 ]; then
-            echo "StaticPublisher=true인 EC2가 정확히 한 대여야 합니다."
-            echo "검색 결과: $PRIMARY_INSTANCE_ID"
+          if [ -z "$PRIMARY_INSTANCE_ID" ]; then
+            echo "migrate 및 정적 파일 배포에 사용할 EC2를 선택하지 못했습니다."
             exit 1
           fi
 
-          echo "대표 EC2: $PRIMARY_INSTANCE_ID"
+          echo "선택된 작업 EC2: $PRIMARY_INSTANCE_ID"
           echo "instance_id=$PRIMARY_INSTANCE_ID" >> "$GITHUB_OUTPUT"
 
       # ----------------------------------------------------------

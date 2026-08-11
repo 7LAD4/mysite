@@ -36,6 +36,9 @@ env:
   # Django collectstatic 결과 업로드 위치
   S3_STATIC_URI: s3://mysite-cdn-bucket-604951793510-ap-northeast-2-an/static
 
+  ASG_NAME: mysite-asg
+  LAUNCH_TEMPLATE_NAME: mysite-lt
+
 jobs:
   # ============================================================
   # 1. Django 테스트
@@ -777,6 +780,174 @@ jobs:
             echo "한 대 이상의 EC2에서 Gunicorn 재시작이 실패했습니다."
             exit 1
           fi
+
+      # ----------------------------------------------------------
+      # 배포가 끝난 대표 EC2를 기준으로 새 AMI 생성
+      # --no-reboot: 인스턴스를 재부팅하지 않고 이미지 생성(서비스 중단 없음)
+      # ----------------------------------------------------------
+      - name: Create AMI from deployed instance
+        id: create_ami
+        shell: bash
+        env:
+          PRIMARY_INSTANCE_ID: ${{ steps.primary_instance.outputs.instance_id }}
+        run: |
+          set -Eeuo pipefail
+
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+          AMI_NAME="mysite-ami-${SHORT_SHA}-${GITHUB_RUN_NUMBER}"
+
+          echo "새 AMI 생성: $AMI_NAME (원본: $PRIMARY_INSTANCE_ID)"
+
+          AMI_ID=$(aws ec2 create-image \
+            --region "$AWS_REGION" \
+            --instance-id "$PRIMARY_INSTANCE_ID" \
+            --name "$AMI_NAME" \
+            --description "mysite deploy ${GITHUB_SHA}" \
+            --no-reboot \
+            --query "ImageId" \
+            --output text)
+
+          echo "AMI ID: $AMI_ID"
+
+          aws ec2 create-tags \
+            --region "$AWS_REGION" \
+            --resources "$AMI_ID" \
+            --tags Key=Name,Value="$AMI_NAME" \
+                   Key=Project,Value="$PROJECT_TAG" \
+                   Key=Commit,Value="$GITHUB_SHA"
+
+          echo "AMI 사용 가능 상태까지 대기(수 분 소요)"
+          aws ec2 wait image-available \
+            --region "$AWS_REGION" \
+            --image-ids "$AMI_ID"
+
+          echo "AMI 준비 완료"
+          echo "ami_id=$AMI_ID" >> "$GITHUB_OUTPUT"
+
+      # ----------------------------------------------------------
+      # 새 AMI로 시작 템플릿의 새 버전을 만들고 기본 버전으로 지정
+      # ----------------------------------------------------------
+      - name: Update launch template with new AMI
+        id: update_launch_template
+        shell: bash
+        env:
+          AMI_ID: ${{ steps.create_ami.outputs.ami_id }}
+        run: |
+          set -Eeuo pipefail
+
+          NEW_VERSION=$(aws ec2 create-launch-template-version \
+            --region "$AWS_REGION" \
+            --launch-template-name "$LAUNCH_TEMPLATE_NAME" \
+            --source-version '$Latest' \
+            --version-description "deploy ${GITHUB_SHA}" \
+            --launch-template-data "{\"ImageId\":\"$AMI_ID\"}" \
+            --query "LaunchTemplateVersion.VersionNumber" \
+            --output text)
+
+          echo "새 시작 템플릿 버전: $NEW_VERSION"
+
+          aws ec2 modify-launch-template \
+            --region "$AWS_REGION" \
+            --launch-template-name "$LAUNCH_TEMPLATE_NAME" \
+            --default-version "$NEW_VERSION"
+
+          echo "기본 버전으로 지정 완료"
+          echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+
+      # ----------------------------------------------------------
+      # ASG 인스턴스 새로고침(롤링 업데이트) 시작
+      # MinHealthyPercentage=50 : 절반은 항상 서비스 유지하며 교체
+      # ----------------------------------------------------------
+      - name: Start ASG instance refresh
+        id: instance_refresh
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          REFRESH_ID=$(aws autoscaling start-instance-refresh \
+            --region "$AWS_REGION" \
+            --auto-scaling-group-name "$ASG_NAME" \
+            --preferences '{"MinHealthyPercentage":50,"InstanceWarmup":90,"SkipMatching":false}' \
+            --query "InstanceRefreshId" \
+            --output text)
+
+          echo "인스턴스 새로고침 시작: $REFRESH_ID"
+          echo "refresh_id=$REFRESH_ID" >> "$GITHUB_OUTPUT"
+
+      # ----------------------------------------------------------
+      # 롤링 업데이트 완료까지 진행 상황 확인
+      # ----------------------------------------------------------
+      - name: Wait for instance refresh
+        shell: bash
+        env:
+          REFRESH_ID: ${{ steps.instance_refresh.outputs.refresh_id }}
+        run: |
+          set -Eeuo pipefail
+
+          for _ in $(seq 1 60); do
+            STATUS=$(aws autoscaling describe-instance-refreshes \
+              --region "$AWS_REGION" \
+              --auto-scaling-group-name "$ASG_NAME" \
+              --instance-refresh-ids "$REFRESH_ID" \
+              --query "InstanceRefreshes[0].Status" \
+              --output text)
+
+            PERCENT=$(aws autoscaling describe-instance-refreshes \
+              --region "$AWS_REGION" \
+              --auto-scaling-group-name "$ASG_NAME" \
+              --instance-refresh-ids "$REFRESH_ID" \
+              --query "InstanceRefreshes[0].PercentageComplete" \
+              --output text)
+
+            echo "상태: $STATUS (${PERCENT}%)"
+
+            case "$STATUS" in
+              Successful)
+                echo "ASG 롤링 업데이트 완료"
+                exit 0
+                ;;
+              Failed|Cancelled)
+                echo "ASG 롤링 업데이트 실패: $STATUS"
+                aws autoscaling describe-instance-refreshes \
+                  --region "$AWS_REGION" \
+                  --auto-scaling-group-name "$ASG_NAME" \
+                  --instance-refresh-ids "$REFRESH_ID" \
+                  --query "InstanceRefreshes[0].StatusReason" \
+                  --output text
+                exit 1
+                ;;
+            esac
+
+            sleep 30
+          done
+
+          echo "제한 시간 내에 완료되지 않았습니다. 콘솔에서 확인하세요."
+          exit 1
+
+      # ----------------------------------------------------------
+      # 오래된 AMI 정리(최근 3개만 유지) — 스냅샷 비용 절감
+      # ----------------------------------------------------------
+      - name: Clean up old AMIs
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          OLD_AMIS=$(aws ec2 describe-images \
+            --region "$AWS_REGION" \
+            --owners self \
+            --filters "Name=name,Values=mysite-ami-*" \
+            --query "sort_by(Images, &CreationDate)[:-3].ImageId" \
+            --output text)
+
+          if [ -z "$OLD_AMIS" ]; then
+            echo "정리할 오래된 AMI가 없습니다."
+            exit 0
+          fi
+
+          for AMI in $OLD_AMIS; do
+            echo "AMI 등록 해제: $AMI"
+            aws ec2 deregister-image --region "$AWS_REGION" --image-id "$AMI" || true
+          done
 
       # ----------------------------------------------------------
       # GitHub Actions 실행 결과 요약

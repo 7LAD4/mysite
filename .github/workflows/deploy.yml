@@ -203,7 +203,7 @@ jobs:
       # 추가 태그:
       # StaticPublisher=true
       # ----------------------------------------------------------
-       - name: Select one EC2 for migration and static publishing
+      - name: Select one EC2 for migration and static publishing
         id: primary_instance
         shell: bash
         env:

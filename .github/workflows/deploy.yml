@@ -375,7 +375,8 @@ jobs:
           set -Eeuo pipefail
 
           read -r -d '' REMOTE_SCRIPT <<SCRIPT || true
-          set -Eeuo pipefail
+
+          set -eu
 
           PROJECT_DIR="$PROJECT_DIR"
           VENV_DIR="$VENV_DIR"
@@ -630,7 +631,8 @@ jobs:
           set -Eeuo pipefail
 
           read -r -d '' REMOTE_SCRIPT <<SCRIPT || true
-          set -Eeuo pipefail
+
+          set -eu
 
           PROJECT_DIR="$PROJECT_DIR"
           VENV_DIR="$VENV_DIR"
@@ -769,7 +771,8 @@ jobs:
           set -Eeuo pipefail
 
           read -r -d '' REMOTE_SCRIPT <<SCRIPT || true
-          set -Eeuo pipefail
+
+          set -eu
           systemctl restart "$GUNICORN_SERVICE"
           sleep 3
           systemctl is-active --quiet "$GUNICORN_SERVICE"
@@ -1236,7 +1239,8 @@ jobs:
           fi
 
           read -r -d '' REMOTE_SCRIPT <<SCRIPT || true
-          set -Eeuo pipefail
+
+          set -eu
 
           echo "========================================"
           echo "서버: \$(hostname)"
